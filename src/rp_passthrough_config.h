@@ -1,0 +1,72 @@
+#pragma once
+
+#include <stdint.h>
+
+#ifndef RP_PASSTHROUGH_FORCE_BOOT
+#define RP_PASSTHROUGH_FORCE_BOOT 0
+#endif
+
+#ifndef RP_PASSTHROUGH_NO_CTRL_TIMEOUT_MS
+#define RP_PASSTHROUGH_NO_CTRL_TIMEOUT_MS 15000U
+#endif
+
+#ifndef RP_PASSTHROUGH_PORT
+#define RP_PASSTHROUGH_PORT 7777
+#endif
+
+#ifndef RP_WIFI_STA_TIMEOUT_MS
+#define RP_WIFI_STA_TIMEOUT_MS 10000U
+#endif
+
+#ifndef RP_AP_SSID_PREFIX
+#define RP_AP_SSID_PREFIX "Robot2W-PT"
+#endif
+
+#ifndef RP_AP_PASSWORD
+#define RP_AP_PASSWORD "robot2wheel"
+#endif
+
+#ifndef RP_PASSTHROUGH_IDLE_TIMEOUT_MS
+#define RP_PASSTHROUGH_IDLE_TIMEOUT_MS 60000U
+#endif
+
+#ifndef RP_CONFIG_PORT
+#define RP_CONFIG_PORT 80
+#endif
+
+#ifndef RP_BRIDGE_RX_BUF_SIZE
+#define RP_BRIDGE_RX_BUF_SIZE 1024U
+#endif
+
+#ifndef RP_BRIDGE_TX_BUF_SIZE
+#define RP_BRIDGE_TX_BUF_SIZE 1024U
+#endif
+
+#ifndef RP_ENABLE_MDNS
+#define RP_ENABLE_MDNS 1
+#endif
+
+#ifndef RP_WIFI_NAMESPACE
+#define RP_WIFI_NAMESPACE "rp_wifi"
+#endif
+
+#ifndef RP_WIFI_SSID_KEY
+#define RP_WIFI_SSID_KEY "ssid"
+#endif
+
+#ifndef RP_WIFI_PASS_KEY
+#define RP_WIFI_PASS_KEY "pass"
+#endif
+
+// UART link flow control / buffering
+#ifndef RP_STMLINK_FLOWCTRL_THRESHOLD
+#define RP_STMLINK_FLOWCTRL_THRESHOLD 32U
+#endif
+
+#ifndef RP_STMLINK_RX_BUFFER_SIZE
+#define RP_STMLINK_RX_BUFFER_SIZE 4096U
+#endif
+
+#ifndef RP_STMLINK_TX_BUFFER_SIZE
+#define RP_STMLINK_TX_BUFFER_SIZE 1024U
+#endif

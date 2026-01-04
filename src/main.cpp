@@ -2,15 +2,17 @@
 #include <BLEGamepadClient.h>
 #include <U8x8lib.h>
 #include <Wire.h>
-#include <menu.h>
-#include <menuIO/U8x8Out.h>
-#include <menuIO/serialOut.h>
-#include <menuIO/serialIn.h>
-#include <menuIO/keyIn.h>
-#include <menuIO/chainStream.h>
-#include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <menu.h>
+#include <menuIO/U8x8Out.h>
+#include <menuIO/chainStream.h>
+#include <menuIO/keyIn.h>
+#include <menuIO/serialIn.h>
+#include <menuIO/serialOut.h>
+
+#include <cstring>
+
 #include "GamepadMenuIn.h"
 #include "RpPassthrough.h"
 #include "Stm32Link.h"
@@ -36,6 +38,7 @@ static bool gControllerEverConnected = false;
 static bool gForceDashboardRedraw = true;
 static bool gForcePassthroughRedraw = true;
 static TaskHandle_t gStmLinkTaskHandle = nullptr;
+static constexpr uint32_t kYToggleDebounceMs = 250U;
 
 #ifndef RP_STMLINK_TASK_STACK_WORDS
 #define RP_STMLINK_TASK_STACK_WORDS 4096U
@@ -50,33 +53,31 @@ static TaskHandle_t gStmLinkTaskHandle = nullptr;
 // ---- Outputs: serial + OLED ----
 #define MAX_DEPTH 3
 
-// MENU_OUTPUTS(out, MAX_DEPTH, U8X8_OUT(display, {0,0,16,8}, )   // 128x64 => 16 cols x 8 rows (8x8 font cells)
+// MENU_OUTPUTS(out, MAX_DEPTH, U8X8_OUT(display, {0,0,16,8}, )   // 128x64 => 16 cols x 8 rows (8x8
+// font cells)
 // );
 
-menuIn*    inputs[] = { &gpIn };
+menuIn* inputs[] = {&gpIn};
 chainStream<1> in(inputs);
 
 // NAVROOT(nav, MenuUI::mainMenu, MAX_DEPTH, in, out);
 
-const panel default_serial_panels[] MEMMODE={{0,0,40,10}};
-navNode* default_serial_nodes[sizeof(default_serial_panels)/sizeof(panel)];
-panelsList default_serial_panel_list(
-  default_serial_panels,
-  default_serial_nodes,
-  sizeof(default_serial_panels)/sizeof(panel)
-);
+const panel default_serial_panels[] MEMMODE = {{0, 0, 40, 10}};
+navNode* default_serial_nodes[sizeof(default_serial_panels) / sizeof(panel)];
+panelsList default_serial_panel_list(default_serial_panels, default_serial_nodes,
+                                     sizeof(default_serial_panels) / sizeof(panel));
 
-//define output device
-idx_t serialTops[MAX_DEPTH]={0};
-serialOut outSerial(*(Print*)&Serial,serialTops);
+// define output device
+idx_t serialTops[MAX_DEPTH] = {0};
+serialOut outSerial(*(Print*)&Serial, serialTops);
 
-//define outputs controller
+// define outputs controller
 idx_t u8x8_tops[MAX_DEPTH];
-PANELS(u8x8Panels,{0,0,U8_Width/8,U8_Height/8});
-U8x8Out u8x8Out(display,u8x8_tops,u8x8Panels);
+PANELS(u8x8Panels, {0, 0, U8_Width / 8, U8_Height / 8});
+U8x8Out u8x8Out(display, u8x8_tops, u8x8Panels);
 
-menuOut* constMEM outputs[] MEMMODE={&u8x8Out};//list of output devices
-outputsList out(outputs,1);//outputs list controller
+menuOut* constMEM outputs[] MEMMODE = {&u8x8Out};  // list of output devices
+outputsList out(outputs, 1);                       // outputs list controller
 
 // //define navigation root and aux objects
 // navNode nav_cursors[MAX_DEPTH];//aux objects to control each level of navigation
@@ -85,28 +86,11 @@ NAVROOT(nav, MenuUI::mainMenu, MAX_DEPTH, in, out);
 
 static bool gMenuActive = false;
 static bool gPrevMenuButton = false;
+static bool gPrevYButton = false;
+static bool gTeleopEstopActive = true;
+static uint32_t gLastYToggleMs = 0;
 static XboxControlsState gPrevState;
 static uint32_t gLoopReportMs = 0;
-
-#ifndef RP_LOOP_TRACE
-#define RP_LOOP_TRACE 1
-#endif
-#ifndef RP_LOOP_TRACE_BUDGET
-#define RP_LOOP_TRACE_BUDGET 80U
-#endif
-
-#if RP_LOOP_TRACE
-static uint32_t gTraceBudget = RP_LOOP_TRACE_BUDGET;
-static void traceMark(const char* label) {
-  if (gTraceBudget == 0U) {
-    return;
-  }
-  Serial.printf("[TRACE] %lu %s\n", static_cast<unsigned long>(millis()), label);
-  gTraceBudget--;
-}
-#else
-static void traceMark(const char*) {}
-#endif
 
 static void splash() {
   display.clear();
@@ -172,9 +156,9 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
   };
 
   auto status = link.getStatus();
-  bool armed = (status.status & 0x01);
-  bool estop = (status.status & 0x02);
-  bool fault = (status.status & 0x04) || (status.faults != 0);
+  bool armed = (status.status & ROBOT_STATUS_ARMED);
+  bool estop = (status.status & ROBOT_STATUS_ESTOP);
+  bool fault = (status.status & ROBOT_STATUS_FAULT) || (status.faults != 0);
   const char* imuState = status.hasTelem ? (fault ? "FAULT" : "OK") : "--";
   const char* robotState = fault ? "FAULT" : (estop ? "ESTOP" : (armed ? "ARMED" : "DISARM"));
   const char* motorState = armed ? "ON" : "OFF";
@@ -199,7 +183,6 @@ static void renderPassthroughScreen(RpPassthrough& pt, bool forceRedraw) {
     display.clear();
     display.drawString(0, 0, "RP Passthrough");
     display.drawString(0, 2, "WiFi:");
-    display.drawString(0, 3, "IP:");
     display.drawString(0, 5, "Client:");
     labelsDrawn = true;
   }
@@ -220,21 +203,19 @@ static void renderPassthroughScreen(RpPassthrough& pt, bool forceRedraw) {
   const char* client = pt.hasClient() ? "OK" : "--";
 
   drawValue(2, 6, 0, wifiMode);
-  drawValue(3, 4, 1, ip ? ip : "--");
+  drawValue(3, 0, 1, ip ? ip : "");
   drawValue(5, 8, 2, client);
 }
 
 static void debugControls(const XboxControlsState& s) {
   Serial.printf(
-    "[CTRL] LX=%.2f LY=%.2f RX=%.2f RY=%.2f LT=%.2f RT=%.2f "
-    "A=%d B=%d X=%d Y=%d LB=%d RB=%d Menu=%d View=%d Share=%d "
-    "Dpad(U%d D%d L%d R%d) LS=%d RS=%d\n",
-    s.leftStickX, s.leftStickY, s.rightStickX, s.rightStickY,
-    s.leftTrigger, s.rightTrigger,
-    s.buttonA, s.buttonB, s.buttonX, s.buttonY,
-    s.leftBumper, s.rightBumper, s.menuButton, s.viewButton, s.shareButton,
-    s.dpadUp, s.dpadDown, s.dpadLeft, s.dpadRight,
-    s.leftStickButton, s.rightStickButton);
+      "[CTRL] LX=%.2f LY=%.2f RX=%.2f RY=%.2f LT=%.2f RT=%.2f "
+      "A=%d B=%d X=%d Y=%d LB=%d RB=%d Menu=%d View=%d Share=%d "
+      "Dpad(U%d D%d L%d R%d) LS=%d RS=%d\n",
+      s.leftStickX, s.leftStickY, s.rightStickX, s.rightStickY, s.leftTrigger, s.rightTrigger,
+      s.buttonA, s.buttonB, s.buttonX, s.buttonY, s.leftBumper, s.rightBumper, s.menuButton,
+      s.viewButton, s.shareButton, s.dpadUp, s.dpadDown, s.dpadLeft, s.dpadRight, s.leftStickButton,
+      s.rightStickButton);
 }
 
 static bool controlsChanged(const XboxControlsState& a, const XboxControlsState& b) {
@@ -253,20 +234,14 @@ static void logLoopStatus(uint32_t now, bool ctrlConnected) {
   const auto status = stmLink.getStatus();
 
   Serial.printf(
-    "[LOOP] ms=%lu ctrl=%u menu=%u pt=%u wifi=%u ap=%u client=%u telem=%lu/s last_telem_ms=%lu age=%lu link_ok=%u has_telem=%u faults=0x%04x\n",
-    static_cast<unsigned long>(now),
-    ctrlConnected ? 1U : 0U,
-    gMenuActive ? 1U : 0U,
-    rpPassthrough.isActive() ? 1U : 0U,
-    rpPassthrough.wifiReady() ? 1U : 0U,
-    rpPassthrough.isApMode() ? 1U : 0U,
-    rpPassthrough.hasClient() ? 1U : 0U,
-    static_cast<unsigned long>(telemPerSec),
-    static_cast<unsigned long>(lastTelem),
-    static_cast<unsigned long>(telemAge),
-    status.linkOk ? 1U : 0U,
-    status.hasTelem ? 1U : 0U,
-    status.faults);
+      "[LOOP] ms=%lu ctrl=%u menu=%u pt=%u wifi=%u ap=%u client=%u telem=%lu/s last_telem_ms=%lu "
+      "age=%lu link_ok=%u has_telem=%u faults=0x%04x\n",
+      static_cast<unsigned long>(now), ctrlConnected ? 1U : 0U, gMenuActive ? 1U : 0U,
+      rpPassthrough.isActive() ? 1U : 0U, rpPassthrough.wifiReady() ? 1U : 0U,
+      rpPassthrough.isApMode() ? 1U : 0U, rpPassthrough.hasClient() ? 1U : 0U,
+      static_cast<unsigned long>(telemPerSec), static_cast<unsigned long>(lastTelem),
+      static_cast<unsigned long>(telemAge), status.linkOk ? 1U : 0U, status.hasTelem ? 1U : 0U,
+      status.faults);
 }
 
 static void enterPassthrough() {
@@ -296,9 +271,7 @@ static void exitPassthrough() {
   gForceDashboardRedraw = true;
 }
 
-
-void setup(void)
-{
+void setup(void) {
   Serial.begin(115200);
   controller.begin();
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
@@ -309,18 +282,13 @@ void setup(void)
   rpPassthrough.begin();
   MenuUI::setIpString(rpPassthrough.ipAddress());
   splash();
-  setMenuActive(false); // start in dashboard/idle mode
+  setMenuActive(false);  // start in dashboard/idle mode
   gBootMs = millis();
 
   if (gStmLinkTaskHandle == nullptr) {
-    const BaseType_t ok = xTaskCreatePinnedToCore(
-      stmLinkTask,
-      "Stm32Link",
-      RP_STMLINK_TASK_STACK_WORDS,
-      nullptr,
-      RP_STMLINK_TASK_PRIORITY,
-      &gStmLinkTaskHandle,
-      1);
+    const BaseType_t ok =
+        xTaskCreatePinnedToCore(stmLinkTask, "Stm32Link", RP_STMLINK_TASK_STACK_WORDS, nullptr,
+                                RP_STMLINK_TASK_PRIORITY, &gStmLinkTaskHandle, 1);
     if (ok != pdPASS) {
       Serial.println("[LINK] Failed to start Stm32Link task");
     }
@@ -336,18 +304,13 @@ void setup(void)
 #endif
 }
 
-void loop()
-{
-  traceMark("loop start");
+void loop() {
   const uint32_t now = millis();
-  traceMark("before controller.isConnected");
   const bool ctrlConnected = controller.isConnected();
-  traceMark(ctrlConnected ? "controller connected" : "controller not connected");
   XboxControlsState s{};
   bool haveState = false;
 
   if (ctrlConnected) {
-    traceMark("before controller.read");
     if (!g_connected) {
       g_connected = true;
       display.clear();
@@ -358,7 +321,7 @@ void loop()
       gForcePassthroughRedraw = true;
     }
     controller.read(&s);
-    traceMark("after controller.read");
+
     haveState = true;
     gControllerEverConnected = true;
     if (controlsChanged(s, gPrevState)) {
@@ -371,30 +334,34 @@ void loop()
     if (menuPressed) {
       setMenuActive(!gMenuActive);
     }
+    const bool yPressed = s.buttonY;
+    if (yPressed && !gPrevYButton) {
+      if (now - gLastYToggleMs >= kYToggleDebounceMs) {
+        gTeleopEstopActive = !gTeleopEstopActive;
+        gLastYToggleMs = now;
+      }
+    }
+    gPrevYButton = yPressed;
   } else {
     g_connected = false;
     gPrevState = {};
     gPrevMenuButton = false;
+    gPrevYButton = false;
+    gTeleopEstopActive = true;
   }
 
-  traceMark("before auto-passthrough");
-  if (!rpPassthrough.isActive() &&
-      !gControllerEverConnected &&
-      !ctrlConnected &&
+  if (!rpPassthrough.isActive() && !gControllerEverConnected && !ctrlConnected &&
       RP_PASSTHROUGH_NO_CTRL_TIMEOUT_MS > 0U &&
       (now - gBootMs >= RP_PASSTHROUGH_NO_CTRL_TIMEOUT_MS)) {
     enterPassthrough();
   }
 
   if (rpPassthrough.isActive()) {
-    traceMark("passthrough active");
     rpPassthrough.tick();
     if (ctrlConnected && gMenuActive) {
-      traceMark("menu poll (pt)");
       gpIn.update(s);
       nav.poll();
     } else {
-      traceMark("render passthrough");
       renderPassthroughScreen(rpPassthrough, gForcePassthroughRedraw);
       gForcePassthroughRedraw = false;
     }
@@ -408,20 +375,19 @@ void loop()
     return;
   }
 
+  const uint8_t teleopFlags =
+      gTeleopEstopActive ? ROBOT_TELEOP_FLAG_ESTOP : ROBOT_TELEOP_FLAG_ARM;
   if (ctrlConnected) {
     if (gMenuActive) {
-      traceMark("menu poll");
       gpIn.update(s);
       nav.poll();
     } else {
-      traceMark("send teleop");
-      stmLink.sendTeleop(s, 0);
-      traceMark("render dashboard");
+      stmLink.sendTeleop(s, teleopFlags);
+
       renderDashboard(stmLink, controller, gForceDashboardRedraw);
       gForceDashboardRedraw = false;
     }
   } else {
-    traceMark("render dashboard (no ctrl)");
     renderDashboard(stmLink, controller, gForceDashboardRedraw);
     gForceDashboardRedraw = false;
   }
@@ -431,7 +397,6 @@ void loop()
     enterPassthrough();
   }
 
-  traceMark("before rpPassthrough.tick");
   rpPassthrough.tick();
   logLoopStatus(now, ctrlConnected);
 }

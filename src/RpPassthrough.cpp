@@ -10,12 +10,24 @@ static String htmlEscape(const String& input) {
   for (size_t i = 0; i < input.length(); ++i) {
     const char c = input[i];
     switch (c) {
-      case '&': out += "&amp;"; break;
-      case '<': out += "&lt;"; break;
-      case '>': out += "&gt;"; break;
-      case '"': out += "&quot;"; break;
-      case '\'': out += "&#39;"; break;
-      default: out += c; break;
+      case '&':
+        out += "&amp;";
+        break;
+      case '<':
+        out += "&lt;";
+        break;
+      case '>':
+        out += "&gt;";
+        break;
+      case '"':
+        out += "&quot;";
+        break;
+      case '\'':
+        out += "&#39;";
+        break;
+      default:
+        out += c;
+        break;
     }
   }
   return out;
@@ -153,8 +165,7 @@ bool RpPassthrough::startWifi() {
     if (startAp()) {
       wifiReady_ = true;
       apMode_ = true;
-      Serial.printf("[RP] WiFi AP started: %s (%s)\n", apSsid_,
-                    WiFi.softAPIP().toString().c_str());
+      Serial.printf("[RP] WiFi AP started: %s (%s)\n", apSsid_, WiFi.softAPIP().toString().c_str());
     }
   }
 
@@ -201,8 +212,7 @@ void RpPassthrough::stopClient(const char* reason) {
   }
   client_.stop();
   if (rxDropCount_ || txDropCount_) {
-    Serial.printf("[RP] Bridge drops rx=%lu tx=%lu\n",
-                  static_cast<unsigned long>(rxDropCount_),
+    Serial.printf("[RP] Bridge drops rx=%lu tx=%lu\n", static_cast<unsigned long>(rxDropCount_),
                   static_cast<unsigned long>(txDropCount_));
   }
   rxDropCount_ = 0;
@@ -232,13 +242,10 @@ void RpPassthrough::startConfigServer() {
   }
   configServer_.on("/", HTTP_GET, [this]() { handleConfigRoot(); });
   configServer_.on("/save", HTTP_POST, [this]() { handleConfigSave(); });
-  configServer_.onNotFound([this]() {
-    configServer_.send(404, "text/plain", "Not Found");
-  });
+  configServer_.onNotFound([this]() { configServer_.send(404, "text/plain", "Not Found"); });
   configServer_.begin();
   configServerStarted_ = true;
-  Serial.printf("[RP] Config portal on http://%s:%u/\n",
-                WiFi.softAPIP().toString().c_str(),
+  Serial.printf("[RP] Config portal on http://%s:%u/\n", WiFi.softAPIP().toString().c_str(),
                 static_cast<unsigned>(RP_CONFIG_PORT));
 }
 
@@ -340,13 +347,13 @@ bool RpPassthrough::attemptStaConnect(const String& ssid, const String& pass) {
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.disconnect(false, true);
+  Serial.printf("Coonecting to: %s, pass: %s", ssid.c_str(), pass.c_str());
   WiFi.begin(ssid.c_str(), pass.c_str());
 
   const uint32_t start = millis();
   while (millis() - start < RP_WIFI_STA_TIMEOUT_MS) {
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.printf("[RP] WiFi STA connected: %s\n",
-                    WiFi.localIP().toString().c_str());
+      Serial.printf("[RP] WiFi STA connected: %s\n", WiFi.localIP().toString().c_str());
       WiFi.softAPdisconnect(true);
       WiFi.mode(WIFI_STA);
       apMode_ = false;
@@ -408,8 +415,8 @@ void RpPassthrough::updateIpString() {
     snprintf(ipStr_, sizeof(ipStr_), "0.0.0.0");
     return;
   }
-  IPAddress ip = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP()
-                                                 : (apMode_ ? WiFi.softAPIP() : IPAddress());
+  IPAddress ip =
+      (WiFi.status() == WL_CONNECTED) ? WiFi.localIP() : (apMode_ ? WiFi.softAPIP() : IPAddress());
   if (ip == IPAddress()) {
     snprintf(ipStr_, sizeof(ipStr_), "0.0.0.0");
     return;

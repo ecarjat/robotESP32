@@ -15,7 +15,7 @@
 #endif
 
 #ifndef RP_WIFI_STA_TIMEOUT_MS
-#define RP_WIFI_STA_TIMEOUT_MS 10000U
+#define RP_WIFI_STA_TIMEOUT_MS 50000U
 #endif
 
 #ifndef RP_AP_SSID_PREFIX

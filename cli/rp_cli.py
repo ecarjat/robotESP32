@@ -27,6 +27,12 @@ ROBOT_FLAG_IS_ACK = 0x0002
 
 ROBOT_RPC_METHOD_GET_PARAM = 0x01
 ROBOT_RPC_METHOD_SET_PARAM = 0x02
+ROBOT_RPC_METHOD_IMU_CALIB_FACE = 0x10
+ROBOT_RPC_METHOD_MOTOR_ENABLE = 0x20
+ROBOT_RPC_METHOD_MOTOR_DISABLE = 0x21
+ROBOT_RPC_METHOD_MOTOR_RUN = 0x22
+ROBOT_RPC_METHOD_BALANCE_ENABLE = 0x23
+ROBOT_RPC_METHOD_BALANCE_DISABLE = 0x24
 
 ROBOT_RPC_FLAG_SAVE = 0x01
 
@@ -36,6 +42,10 @@ RPC_STATUS_NAMES = {
     0x02: "BAD_OFFSET",
     0x03: "STORAGE_ERR",
     0x04: "BAD_METHOD",
+    0x05: "BAD_PARAM",
+    0x06: "NOT_READY",
+    0x07: "TIMEOUT",
+    0x08: "INCOMPLETE",
 }
 
 HEADER_FMT = "<HBBHHH"
@@ -43,6 +53,20 @@ HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 RPC_HDR_FMT = "<BBHH"
 RPC_HDR_SIZE = struct.calcsize(RPC_HDR_FMT)
+CALIB_FACE_FMT = "<BBH"
+CALIB_FACE_SIZE = struct.calcsize(CALIB_FACE_FMT)
+MOTOR_RUN_FMT = "<BBf"
+MOTOR_RUN_SIZE = struct.calcsize(MOTOR_RUN_FMT)
+
+ROBOT_IMU_FACE_X_POS_UP = 0
+ROBOT_IMU_FACE_X_NEG_UP = 1
+ROBOT_IMU_FACE_Y_POS_UP = 2
+ROBOT_IMU_FACE_Y_NEG_UP = 3
+ROBOT_IMU_FACE_Z_POS_UP = 4
+ROBOT_IMU_FACE_Z_NEG_UP = 5
+
+ROBOT_MOTOR_SIDE_LEFT = 0
+ROBOT_MOTOR_SIDE_RIGHT = 1
 
 TYPE_FORMATS = {
     "i8": ("b", 1),
@@ -52,6 +76,30 @@ TYPE_FORMATS = {
     "i32": ("i", 4),
     "u32": ("I", 4),
     "float": ("f", 4),
+}
+
+CALIB_TIMEOUT_S = 5.0
+
+FACE_NAME_MAP = {
+    "UP": ROBOT_IMU_FACE_Z_POS_UP,
+    "DOWN": ROBOT_IMU_FACE_Z_NEG_UP,
+    "FRONT": ROBOT_IMU_FACE_X_NEG_UP,
+    "BACK": ROBOT_IMU_FACE_X_POS_UP,
+    "REAR": ROBOT_IMU_FACE_X_POS_UP,
+    "LEFT": ROBOT_IMU_FACE_Y_NEG_UP,
+    "RIGHT": ROBOT_IMU_FACE_Y_POS_UP,
+    "X+": ROBOT_IMU_FACE_X_POS_UP,
+    "+X": ROBOT_IMU_FACE_X_POS_UP,
+    "X-": ROBOT_IMU_FACE_X_NEG_UP,
+    "-X": ROBOT_IMU_FACE_X_NEG_UP,
+    "Y+": ROBOT_IMU_FACE_Y_POS_UP,
+    "+Y": ROBOT_IMU_FACE_Y_POS_UP,
+    "Y-": ROBOT_IMU_FACE_Y_NEG_UP,
+    "-Y": ROBOT_IMU_FACE_Y_NEG_UP,
+    "Z+": ROBOT_IMU_FACE_Z_POS_UP,
+    "+Z": ROBOT_IMU_FACE_Z_POS_UP,
+    "Z-": ROBOT_IMU_FACE_Z_NEG_UP,
+    "-Z": ROBOT_IMU_FACE_Z_NEG_UP,
 }
 
 
@@ -94,7 +142,8 @@ def load_params(path):
 
 
 def robot_crc32(data):
-    return zlib.crc32(data, 0xFFFFFFFF) ^ 0xFFFFFFFF
+    # zlib.crc32 already implements CRC-32/ISO-HDLC with init/xorout baked in.
+    return zlib.crc32(data) & 0xFFFFFFFF
 
 
 def cobs_encode(data):
@@ -281,14 +330,42 @@ def parse_rpc_response(frame):
     return method, status, offset, length, data
 
 
+def parse_face_name(name):
+    key = name.strip().upper()
+    if key in FACE_NAME_MAP:
+        return FACE_NAME_MAP[key]
+    raise ValueError("Unknown face: {}".format(name))
+
+
+def parse_imu_name(name):
+    if name is None:
+        return 0
+    key = name.strip().upper()
+    if key in ("0", "IMU1", "PRIMARY", "BMI", "BMI270"):
+        return 0
+    if key in ("1", "IMU2", "SECONDARY", "ICM", "ICM42688"):
+        return 1
+    raise ValueError("Unknown IMU: {}".format(name))
+
+
 def print_help():
     print("Commands:")
     print("  GET <param>          Read a parameter by name")
     print("  GET ALL              Dump all known parameters")
     print("  SET <param> <value> [SAVE]  Set a parameter (optional SAVE persists)")
+    print("  CALIB <face> [imu]   Capture IMU calibration face (use SAVE to persist)")
+    print("  CALIBRATE <face> [imu]  Alias for CALIB")
+    print("  BALANCE | ARM        Put robot in balancing mode (arm)")
+    print("  DISARM               Disarm and disable motors")
+    print("  MOTOR ENABLE|DISABLE Enable or disable motors for manual run")
+    print("  RUN LEFT|RIGHT <intensity>  Manual run (-1..1, scaled by IqMax)")
     print("  SAVE                 Persist parameters to flash (firmware support required)")
     print("  HELP                 Show this help")
     print("  EXIT | QUIT          Exit the CLI")
+    print("")
+    print("Faces: up, down, front, back, left, right, x+/x-, y+/y-, z+/z-")
+    print("  front/back/left/right assume that face is DOWN (e.g., front = -X up).")
+    print("IMU: imu1/bmi270 or imu2/icm42688 (default: imu1)")
 
 
 def setup_readline(param_names):
@@ -296,7 +373,21 @@ def setup_readline(param_names):
         return
     readline.parse_and_bind("tab: complete")
     readline.set_completer_delims(" \t\n")
-    commands = ["GET", "SET", "SAVE", "HELP", "EXIT", "QUIT"]
+    commands = [
+        "GET",
+        "SET",
+        "CALIB",
+        "CALIBRATE",
+        "BALANCE",
+        "ARM",
+        "MOTOR",
+        "RUN",
+        "DISARM",
+        "SAVE",
+        "HELP",
+        "EXIT",
+        "QUIT",
+    ]
     param_list = sorted(param_names)
 
     def completer(text, state):
@@ -310,6 +401,12 @@ def setup_readline(param_names):
             cmd = tokens[0].upper()
             if cmd in ("GET", "SET"):
                 options = param_list + (["ALL"] if cmd == "GET" else [])
+            elif cmd in ("CALIB", "CALIBRATE"):
+                options = sorted(set(FACE_NAME_MAP.keys()))
+            elif cmd == "MOTOR":
+                options = ["ENABLE", "DISABLE"]
+            elif cmd == "RUN":
+                options = ["LEFT", "RIGHT"]
             elif cmd in commands:
                 options = []
             else:
@@ -320,6 +417,12 @@ def setup_readline(param_names):
                 options = param_list + ["ALL"]
             elif cmd == "SET" and len(tokens) == 2:
                 options = param_list
+            elif cmd in ("CALIB", "CALIBRATE") and len(tokens) == 2:
+                options = sorted(set(FACE_NAME_MAP.keys()))
+            elif cmd == "MOTOR" and len(tokens) == 2:
+                options = ["ENABLE", "DISABLE"]
+            elif cmd == "RUN" and len(tokens) == 2:
+                options = ["LEFT", "RIGHT"]
             else:
                 options = []
         matches = [opt for opt in options if opt.upper().startswith(text.upper())]
@@ -433,6 +536,171 @@ def cmd_save(client):
     print("SAVE: OK")
 
 
+def cmd_calib(client, face_name, imu_name=None):
+    try:
+        face = parse_face_name(face_name)
+    except ValueError as exc:
+        print("CALIB: {}".format(exc))
+        return
+    try:
+        imu = parse_imu_name(imu_name)
+    except ValueError as exc:
+        print("CALIB: {}".format(exc))
+        return
+    payload = struct.pack(CALIB_FACE_FMT, imu, face, 0)
+    prev_timeout = client.timeout
+    if client.timeout < CALIB_TIMEOUT_S:
+        client.timeout = CALIB_TIMEOUT_S
+    try:
+        frame = client.rpc_exchange(
+            ROBOT_RPC_METHOD_IMU_CALIB_FACE,
+            0,
+            0,
+            payload,
+            save_flag=False,
+        )
+    except (TimeoutError, ConnectionError) as exc:
+        print("CALIB failed: {}".format(exc))
+        client.timeout = prev_timeout
+        return
+    client.timeout = prev_timeout
+    try:
+        method, status, _offset, _length, _data = parse_rpc_response(frame)
+    except ValueError as exc:
+        print("CALIB failed: {}".format(exc))
+        return
+    if method != ROBOT_RPC_METHOD_IMU_CALIB_FACE:
+        print("CALIB: unexpected response")
+        return
+    if status == 0:
+        print("CALIB {}: OK".format(face_name))
+        return
+    if status == 0x08:
+        print("CALIB {}: captured (need all 6 faces)".format(face_name))
+        return
+    print("CALIB {}: {}".format(face_name, RPC_STATUS_NAMES.get(status, "ERR")))
+
+
+def cmd_balance(client):
+    try:
+        frame = client.rpc_exchange(
+            ROBOT_RPC_METHOD_BALANCE_ENABLE,
+            0,
+            0,
+            b"",
+            save_flag=False,
+        )
+    except (TimeoutError, ConnectionError) as exc:
+        print("BALANCE failed: {}".format(exc))
+        return
+    try:
+        resp_method, status, _offset, _length, _data = parse_rpc_response(frame)
+    except ValueError as exc:
+        print("BALANCE failed: {}".format(exc))
+        return
+    if resp_method != ROBOT_RPC_METHOD_BALANCE_ENABLE:
+        print("BALANCE: unexpected response")
+        return
+    if status != 0:
+        print("BALANCE: {}".format(RPC_STATUS_NAMES.get(status, "ERR")))
+        return
+    print("BALANCE: OK")
+
+
+def cmd_disarm(client):
+    try:
+        frame = client.rpc_exchange(
+            ROBOT_RPC_METHOD_BALANCE_DISABLE,
+            0,
+            0,
+            b"",
+            save_flag=False,
+        )
+    except (TimeoutError, ConnectionError) as exc:
+        print("DISARM failed: {}".format(exc))
+        return
+    try:
+        resp_method, status, _offset, _length, _data = parse_rpc_response(frame)
+    except ValueError as exc:
+        print("DISARM failed: {}".format(exc))
+        return
+    if resp_method != ROBOT_RPC_METHOD_BALANCE_DISABLE:
+        print("DISARM: unexpected response")
+        return
+    if status != 0:
+        print("DISARM: {}".format(RPC_STATUS_NAMES.get(status, "ERR")))
+        return
+    print("DISARM: OK")
+
+
+def cmd_motor_enable(client, enable):
+    method = ROBOT_RPC_METHOD_MOTOR_ENABLE if enable else ROBOT_RPC_METHOD_MOTOR_DISABLE
+    label = "ENABLE" if enable else "DISABLE"
+    try:
+        frame = client.rpc_exchange(
+            method,
+            0,
+            0,
+            b"",
+            save_flag=False,
+        )
+    except (TimeoutError, ConnectionError) as exc:
+        print("MOTOR {} failed: {}".format(label, exc))
+        return
+    try:
+        resp_method, status, _offset, _length, _data = parse_rpc_response(frame)
+    except ValueError as exc:
+        print("MOTOR {} failed: {}".format(label, exc))
+        return
+    if resp_method != method:
+        print("MOTOR {}: unexpected response".format(label))
+        return
+    if status != 0:
+        print("MOTOR {}: {}".format(label, RPC_STATUS_NAMES.get(status, "ERR")))
+        return
+    print("MOTOR {}: OK".format(label))
+
+
+def cmd_run(client, side_name, value_str):
+    side_key = side_name.strip().upper()
+    if side_key == "LEFT":
+        side = ROBOT_MOTOR_SIDE_LEFT
+    elif side_key == "RIGHT":
+        side = ROBOT_MOTOR_SIDE_RIGHT
+    else:
+        print("RUN: side must be LEFT or RIGHT")
+        return
+    try:
+        intensity = float(value_str)
+    except ValueError:
+        print("RUN: invalid intensity")
+        return
+    payload = struct.pack(MOTOR_RUN_FMT, side, 0, intensity)
+    try:
+        frame = client.rpc_exchange(
+            ROBOT_RPC_METHOD_MOTOR_RUN,
+            0,
+            0,
+            payload,
+            save_flag=False,
+        )
+    except (TimeoutError, ConnectionError) as exc:
+        print("RUN failed: {}".format(exc))
+        return
+    try:
+        method, status, _offset, _length, _data = parse_rpc_response(frame)
+    except ValueError as exc:
+        print("RUN failed: {}".format(exc))
+        return
+    if method != ROBOT_RPC_METHOD_MOTOR_RUN:
+        print("RUN: unexpected response")
+        return
+    if status != 0:
+        print("RUN: {}".format(RPC_STATUS_NAMES.get(status, "ERR")))
+        return
+    print("RUN {}: OK".format(side_name))
+
+
 def repl(client, params):
     param_map = {p.name: p for p in params}
     setup_readline(param_map.keys())
@@ -480,6 +748,37 @@ def repl(client, params):
                     continue
                 save_flag = True
             cmd_set(client, param_map, tokens[1], tokens[2], save_flag=save_flag)
+            continue
+        if cmd == "MOTOR":
+            if len(tokens) != 2 or tokens[1].upper() not in ("ENABLE", "DISABLE"):
+                print("Usage: MOTOR ENABLE|DISABLE")
+                continue
+            cmd_motor_enable(client, tokens[1].upper() == "ENABLE")
+            continue
+        if cmd == "RUN":
+            if len(tokens) != 3:
+                print("Usage: RUN LEFT|RIGHT <intensity>")
+                continue
+            cmd_run(client, tokens[1], tokens[2])
+            continue
+        if cmd in ("CALIB", "CALIBRATE"):
+            if len(tokens) < 2 or len(tokens) > 3:
+                print("Usage: CALIB <face> [imu]")
+                continue
+            imu_name = tokens[2] if len(tokens) == 3 else None
+            cmd_calib(client, tokens[1], imu_name)
+            continue
+        if cmd in ("BALANCE", "ARM"):
+            if len(tokens) != 1:
+                print("Usage: BALANCE")
+                continue
+            cmd_balance(client)
+            continue
+        if cmd == "DISARM":
+            if len(tokens) != 1:
+                print("Usage: DISARM")
+                continue
+            cmd_disarm(client)
             continue
         if cmd == "SAVE":
             cmd_save(client)

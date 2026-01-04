@@ -195,19 +195,9 @@ MENU(motorConfigMenu, "Motor Config", doNothing, noEvent, wrapStyle,
   EXIT("<Back")
 );
 
-MENU(rpEnterMenu, "Enter RP?", doNothing, noEvent, wrapStyle,
-  OP("Confirm", rpConfirmEnter, enterEvent),
-  EXIT("<Back")
-);
-
-MENU(rpExitMenu, "Exit RP?", doNothing, noEvent, wrapStyle,
-  OP("Confirm", rpConfirmExit, enterEvent),
-  EXIT("<Back")
-);
-
 MENU(rpMenu, "RP Passthrough", doNothing, noEvent, wrapStyle,
-  SUBMENU(rpEnterMenu),
-  SUBMENU(rpExitMenu),
+  OP("Enter RP (OK)", rpConfirmEnter, enterEvent),
+  OP("Exit RP (OK)", rpConfirmExit, enterEvent),
   OP("Show IP", showIp, enterEvent),
   EXIT("<Back")
 );

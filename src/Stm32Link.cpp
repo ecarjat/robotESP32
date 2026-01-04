@@ -14,40 +14,43 @@ static constexpr uint8_t MAX_RETRIES = 3;
 
 Stm32Link::Stm32Link(HardwareSerial& port) : port_(port) {
   robot_mux_init(&mux_);
-  robot_mux_register(&mux_, ROBOT_CHANNEL_TELEM,
-                     [](uint8_t, const uint8_t* payload, size_t len, void* ctx) {
-                       if (len < sizeof(robot_telem_v1_t)) return;
-                       const robot_telem_v1_t* telem = reinterpret_cast<const robot_telem_v1_t*>(payload);
-                       Stm32Link* self = static_cast<Stm32Link*>(ctx);
-                       const uint32_t now = millis();
-                       portENTER_CRITICAL(&self->lock_);
-                       self->telemCount_++;
-                       self->lastTelemRxMs_ = now;
-                       self->status_.hasTelem = true;
-                       self->status_.status = telem->status;
-                       self->status_.faults = telem->faults;
-                       self->status_.linkOk = true;
-                       portEXIT_CRITICAL(&self->lock_);
-                       Serial.printf("[TELEM] v%u status=0x%02x faults=0x%04x ts=%lu vx=%.2f wz=%.2f batt=%.2fV\n",
-                                     telem->version, telem->status, telem->faults,
-                                     static_cast<unsigned long>(telem->timestamp_ms),
-                                     telem->vx_mps, telem->wz_radps, telem->batt_v);
-                     },
-                     this);
-  robot_mux_register(&mux_, ROBOT_CHANNEL_RPC,
-                     [](uint8_t type, const uint8_t* payload, size_t len, void* ctx) {
-                       (void)payload;
-                       (void)len;
-                       Serial.printf("[RPC] type=0x%02x len=%u\n", type, static_cast<unsigned int>(len));
-                     },
-                     this);
-  robot_mux_register(&mux_, ROBOT_CHANNEL_FILE,
-                     [](uint8_t type, const uint8_t* payload, size_t len, void* ctx) {
-                       (void)payload;
-                       (void)ctx;
-                       Serial.printf("[FILE] type=0x%02x len=%u\n", type, static_cast<unsigned int>(len));
-                     },
-                     this);
+  robot_mux_register(
+      &mux_, ROBOT_CHANNEL_TELEM,
+      [](uint8_t, const uint8_t* payload, size_t len, void* ctx) {
+        if (len < sizeof(robot_telem_v1_t)) return;
+        const robot_telem_v1_t* telem = reinterpret_cast<const robot_telem_v1_t*>(payload);
+        Stm32Link* self = static_cast<Stm32Link*>(ctx);
+        const uint32_t now = millis();
+        portENTER_CRITICAL(&self->lock_);
+        self->telemCount_++;
+        self->lastTelemRxMs_ = now;
+        self->status_.hasTelem = true;
+        self->status_.status = telem->status;
+        self->status_.faults = telem->faults;
+        self->status_.linkOk = true;
+        portEXIT_CRITICAL(&self->lock_);
+        Serial.printf("[TELEM] v%u status=0x%02x faults=0x%04x ts=%lu vx=%.2f wz=%.2f batt=%.2fV\n",
+                      telem->version, telem->status, telem->faults,
+                      static_cast<unsigned long>(telem->timestamp_ms), telem->vx_mps,
+                      telem->wz_radps, telem->batt_v);
+      },
+      this);
+  robot_mux_register(
+      &mux_, ROBOT_CHANNEL_RPC,
+      [](uint8_t type, const uint8_t* payload, size_t len, void* ctx) {
+        (void)payload;
+        (void)len;
+        Serial.printf("[RPC] type=0x%02x len=%u\n", type, static_cast<unsigned int>(len));
+      },
+      this);
+  robot_mux_register(
+      &mux_, ROBOT_CHANNEL_FILE,
+      [](uint8_t type, const uint8_t* payload, size_t len, void* ctx) {
+        (void)payload;
+        (void)ctx;
+        Serial.printf("[FILE] type=0x%02x len=%u\n", type, static_cast<unsigned int>(len));
+      },
+      this);
 }
 
 void Stm32Link::begin() {
@@ -59,53 +62,32 @@ void Stm32Link::begin() {
 }
 
 void Stm32Link::tick() {
-  static uint32_t traceBudget = 120U;
-  auto traceMark = [&](const char* label) {
-    if (traceBudget == 0U) {
-      return;
-    }
-    Serial.printf("[TRACE][LINK] %lu %s\n",
-                  static_cast<unsigned long>(millis()), label);
-    traceBudget--;
-  };
-
-  traceMark("tick start");
   if (passthrough_) {
-    traceMark("passthrough active");
     return;
   }
 
-  traceMark("before trySendTeleop");
   trySendTeleop();
-  traceMark("after trySendTeleop");
 
   const uint32_t now = millis();
-  traceMark("before heartbeat check");
+
   if (now - lastHeartbeatMs_ >= HEARTBEAT_PERIOD_MS) {
-    traceMark("heartbeat due");
     if (sendFrame(ROBOT_MSG_CMD_HEARTBEAT, nullptr, 0, false, true)) {
-      traceMark("heartbeat sent");
       lastHeartbeatMs_ = now;
       missedHeartbeatCount_ = 0;
     } else {
-      traceMark("heartbeat skipped");
       missedHeartbeatCount_++;
       if (now - lastHeartbeatWarnMs_ >= 250) {
         Serial.printf("[LINK] heartbeat missed (%lu ms since last, missed=%lu, tx_avail=%d)\n",
                       static_cast<unsigned long>(now - lastHeartbeatMs_),
-                      static_cast<unsigned long>(missedHeartbeatCount_),
-                      port_.availableForWrite());
+                      static_cast<unsigned long>(missedHeartbeatCount_), port_.availableForWrite());
         lastHeartbeatWarnMs_ = now;
       }
     }
   }
 
-  traceMark("before pumpRetries");
   pumpRetries(now);
-  traceMark("after pumpRetries");
-  traceMark("before handleIncoming");
+
   handleIncoming();
-  traceMark("after handleIncoming");
 }
 
 void Stm32Link::sendTeleop(const XboxControlsState& state, uint8_t flags) {
@@ -115,7 +97,7 @@ void Stm32Link::sendTeleop(const XboxControlsState& state, uint8_t flags) {
 
   robot_cmd_teleop_t cmd{};
   cmd.vx_mps = state.leftStickY;
-  cmd.wz_radps = state.rightStickX;
+  cmd.wz_radps = -state.leftStickX;
   cmd.flags = flags;
 
   portENTER_CRITICAL(&lock_);
@@ -159,27 +141,8 @@ Stm32Link::LinkStatus Stm32Link::getStatus() const {
 }
 
 void Stm32Link::handleIncoming() {
-  static uint32_t traceBudget = 200U;
-  auto traceMark = [&](const char* label) {
-    if (traceBudget == 0U) {
-      return;
-    }
-    Serial.printf("[TRACE][RX] %lu %s\n",
-                  static_cast<unsigned long>(millis()), label);
-    traceBudget--;
-  };
-
   uint32_t iterCount = 0;
   while (port_.available()) {
-    if (iterCount == 0U) {
-      traceMark("loop enter");
-    }
-    if ((iterCount % 128U) == 0U && iterCount > 0U) {
-      Serial.printf("[TRACE][RX] iter=%lu avail=%d rxLen=%u\n",
-                    static_cast<unsigned long>(iterCount),
-                    port_.available(),
-                    static_cast<unsigned>(rxLen_));
-    }
     iterCount++;
     uint8_t b = static_cast<uint8_t>(port_.read());
     if (b == 0x00U) {
@@ -190,13 +153,11 @@ void Stm32Link::handleIncoming() {
         rxBuf_[rxLen_] = 0x00U;
       }
       robot_frame_t frame;
-      traceMark("frame delimiter");
+
       if (robot_frame_decode(rxBuf_, rxLen_ + 1U, &frame)) {
-        traceMark("frame decoded");
         processFrame(frame);
-        traceMark("frame processed");
+
       } else {
-        traceMark("frame decode failed");
       }
       rxLen_ = 0;
     } else {
@@ -205,17 +166,13 @@ void Stm32Link::handleIncoming() {
       } else {
         // overflow: drop current frame
         rxLen_ = 0;
-        traceMark("rx overflow");
       }
     }
   }
   if (iterCount > 0U) {
     Serial.printf("[TRACE][RX] loop exit iter=%lu avail=%d rxLen=%u\n",
-                  static_cast<unsigned long>(iterCount),
-                  port_.available(),
+                  static_cast<unsigned long>(iterCount), port_.available(),
                   static_cast<unsigned>(rxLen_));
-  } else {
-    traceMark("loop exit (no data)");
   }
 }
 
@@ -254,7 +211,8 @@ void Stm32Link::sendAck(uint16_t seq) {
   }
 }
 
-bool Stm32Link::sendFrame(uint8_t type, const uint8_t* payload, uint16_t len, bool requestAck, bool nonBlocking) {
+bool Stm32Link::sendFrame(uint8_t type, const uint8_t* payload, uint16_t len, bool requestAck,
+                          bool nonBlocking) {
   uint16_t flags = requestAck ? ROBOT_FLAG_ACK_REQ : 0U;
   robot_frame_t frame;
   if (!robot_frame_init(&frame, type, seqCounter_++, flags, payload, len)) {

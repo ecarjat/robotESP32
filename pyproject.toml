@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "rp-cli"
+version = "0.1.0"
+description = "Robot Protocol passthrough CLI"
+authors = ["Robot2Wheel contributors"]
+packages = [{ include = "cli" }]
+include = ["cli/params.json"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+
+[tool.poetry.scripts]
+rp-cli = "cli.rp_cli:main"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

@@ -91,6 +91,14 @@ static bool gTeleopEstopActive = true;
 static uint32_t gLastYToggleMs = 0;
 static XboxControlsState gPrevState;
 static uint32_t gLoopReportMs = 0;
+static constexpr float kTeleopDeadzone = 0.12f;
+
+static float applyDeadzone(float value, float deadzone) {
+  if (value > -deadzone && value < deadzone) {
+    return 0.0f;
+  }
+  return value;
+}
 
 static void splash() {
   display.clear();
@@ -159,7 +167,17 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
   bool armed = (status.status & ROBOT_STATUS_ARMED);
   bool estop = (status.status & ROBOT_STATUS_ESTOP);
   bool fault = (status.status & ROBOT_STATUS_FAULT) || (status.faults != 0);
-  const char* imuState = status.hasTelem ? (fault ? "FAULT" : "OK") : "--";
+  const bool imuCal = (status.status & ROBOT_STATUS_IMU_CAL) != 0;
+  const char* imuState = "--";
+  if (status.hasTelem) {
+    if (fault) {
+      imuState = "FAULT";
+    } else if (!imuCal) {
+      imuState = "UNCAL";
+    } else {
+      imuState = "OK";
+    }
+  }
   const char* robotState = fault ? "FAULT" : (estop ? "ESTOP" : (armed ? "ARMED" : "DISARM"));
   const char* motorState = armed ? "ON" : "OFF";
   const bool connected = ctrl.isConnected();
@@ -382,7 +400,10 @@ void loop() {
       gpIn.update(s);
       nav.poll();
     } else {
-      stmLink.sendTeleop(s, teleopFlags);
+      XboxControlsState filtered = s;
+      filtered.leftStickY = applyDeadzone(filtered.leftStickY, kTeleopDeadzone);
+      filtered.leftStickX = applyDeadzone(filtered.leftStickX, kTeleopDeadzone);
+      stmLink.sendTeleop(filtered, teleopFlags);
 
       renderDashboard(stmLink, controller, gForceDashboardRedraw);
       gForceDashboardRedraw = false;

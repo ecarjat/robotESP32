@@ -348,11 +348,175 @@ def parse_imu_name(name):
     raise ValueError("Unknown IMU: {}".format(name))
 
 
+def read_param_value(client, entry):
+    frame = client.rpc_exchange(
+        ROBOT_RPC_METHOD_GET_PARAM,
+        entry.offset,
+        entry.size,
+        b"",
+        save_flag=False,
+    )
+    method, status, offset, length, data = parse_rpc_response(frame)
+    if status != 0:
+        raise ValueError("status {}".format(RPC_STATUS_NAMES.get(status, "ERR")))
+    if method != ROBOT_RPC_METHOD_GET_PARAM or offset != entry.offset:
+        raise ValueError("unexpected response")
+    if length != entry.size or len(data) != entry.size:
+        raise ValueError("length mismatch")
+    return entry.decode(data)
+
+
+def write_param_value(client, entry, data, save_flag=False):
+    frame = client.rpc_exchange(
+        ROBOT_RPC_METHOD_SET_PARAM,
+        entry.offset,
+        entry.size,
+        data,
+        save_flag=save_flag,
+    )
+    method, status, offset, length, _data = parse_rpc_response(frame)
+    if method != ROBOT_RPC_METHOD_SET_PARAM or offset != entry.offset or length != entry.size:
+        return False, "unexpected response"
+    if status != 0:
+        return False, RPC_STATUS_NAMES.get(status, "ERR")
+    return True, "OK"
+
+
+def warn_balance_limits(client, param_map, entry, new_value):
+    if entry.name == "balance.max_tilt_ref":
+        other_name = "balance.thetaKill"
+        max_tilt = new_value
+        theta_kill = None
+    elif entry.name == "balance.thetaKill":
+        other_name = "balance.max_tilt_ref"
+        max_tilt = None
+        theta_kill = new_value
+    else:
+        return
+
+    other_entry = param_map.get(other_name)
+    if other_entry is None:
+        print("WARN: ensure balance.max_tilt_ref < balance.thetaKill.")
+        return
+    try:
+        other_value = read_param_value(client, other_entry)
+    except (TimeoutError, ConnectionError, ValueError, struct.error) as exc:
+        print("WARN: unable to check {} ({}). Ensure balance.max_tilt_ref < balance.thetaKill.".format(
+            other_name, exc))
+        return
+
+    if max_tilt is None:
+        max_tilt = other_value
+    if theta_kill is None:
+        theta_kill = other_value
+
+    if theta_kill > 0.0 and max_tilt >= theta_kill:
+        print("WARN: balance.max_tilt_ref ({:.6g}) >= balance.thetaKill ({:.6g}); keep max_tilt_ref < thetaKill."
+              .format(max_tilt, theta_kill))
+
+
+def load_param_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    params = payload.get("params") if isinstance(payload, dict) else None
+    if params is None:
+        params = payload
+    if not isinstance(params, dict):
+        raise ValueError("param file must be a JSON object or contain a 'params' object")
+    return params
+
+
+def cmd_export(client, params, path):
+    data = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "params": {},
+    }
+    errors = {}
+    for entry in params:
+        try:
+            value = read_param_value(client, entry)
+        except (TimeoutError, ConnectionError, ValueError, struct.error) as exc:
+            errors[entry.name] = str(exc)
+            continue
+        data["params"][entry.name] = value
+    if errors:
+        data["errors"] = errors
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+    except OSError as exc:
+        print("EXPORT failed: {}".format(exc))
+        return
+    if errors:
+        print("EXPORT {}: OK ({} errors)".format(path, len(errors)))
+    else:
+        print("EXPORT {}: OK".format(path))
+
+
+def cmd_import(client, param_map, path, save_flag=False):
+    try:
+        values = load_param_file(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print("IMPORT failed: {}".format(exc))
+        return
+
+    applied = 0
+    failed = 0
+    skipped = 0
+    for name, value in values.items():
+        entry = param_map.get(name)
+        if entry is None:
+            skipped += 1
+            continue
+        if isinstance(value, bool):
+            value_str = "1" if value else "0"
+        elif isinstance(value, (int, float)):
+            value_str = str(value)
+        elif isinstance(value, str):
+            value_str = value
+        else:
+            print("IMPORT {}: invalid value type {}".format(name, type(value).__name__))
+            failed += 1
+            continue
+        try:
+            data = entry.encode(value_str)
+        except (ValueError, struct.error) as exc:
+            print("IMPORT {}: invalid value ({})".format(name, exc))
+            failed += 1
+            continue
+        if entry.name in ("balance.max_tilt_ref", "balance.thetaKill"):
+            try:
+                new_value = entry.decode(data)
+            except (ValueError, struct.error):
+                new_value = None
+            if new_value is not None:
+                warn_balance_limits(client, param_map, entry, new_value)
+        try:
+            ok, msg = write_param_value(client, entry, data, save_flag=False)
+        except (TimeoutError, ConnectionError, ValueError) as exc:
+            print("IMPORT {}: failed ({})".format(name, exc))
+            failed += 1
+            continue
+        if not ok:
+            print("IMPORT {}: {}".format(name, msg))
+            failed += 1
+            continue
+        applied += 1
+
+    if save_flag and applied > 0:
+        cmd_save(client)
+
+    print("IMPORT {}: applied={} skipped={} failed={}".format(path, applied, skipped, failed))
+
+
 def print_help():
     print("Commands:")
     print("  GET <param>          Read a parameter by name")
     print("  GET ALL              Dump all known parameters")
+    print("  GET <prefix>.*       Dump parameters by prefix (e.g., balance.*)")
     print("  SET <param> <value> [SAVE]  Set a parameter (optional SAVE persists)")
+    print("  EXPORT <file>        Save all parameters to a local JSON file")
+    print("  IMPORT <file> [SAVE] Load parameters from a local JSON file")
     print("  CALIB <face> [imu]   Capture IMU calibration face (use SAVE to persist)")
     print("  CALIBRATE <face> [imu]  Alias for CALIB")
     print("  BALANCE | ARM        Put robot in balancing mode (arm)")
@@ -376,6 +540,8 @@ def setup_readline(param_names):
     commands = [
         "GET",
         "SET",
+        "EXPORT",
+        "IMPORT",
         "CALIB",
         "CALIBRATE",
         "BALANCE",
@@ -400,13 +566,15 @@ def setup_readline(param_names):
         elif len(tokens) == 1:
             cmd = tokens[0].upper()
             if cmd in ("GET", "SET"):
-                options = param_list + (["ALL"] if cmd == "GET" else [])
+                options = param_list + (["ALL", "balance.*"] if cmd == "GET" else [])
             elif cmd in ("CALIB", "CALIBRATE"):
                 options = sorted(set(FACE_NAME_MAP.keys()))
             elif cmd == "MOTOR":
                 options = ["ENABLE", "DISABLE"]
             elif cmd == "RUN":
                 options = ["LEFT", "RIGHT"]
+            elif cmd in ("EXPORT", "IMPORT"):
+                options = []
             elif cmd in commands:
                 options = []
             else:
@@ -414,7 +582,7 @@ def setup_readline(param_names):
         else:
             cmd = tokens[0].upper()
             if cmd == "GET":
-                options = param_list + ["ALL"]
+                options = param_list + ["ALL", "balance.*"]
             elif cmd == "SET" and len(tokens) == 2:
                 options = param_list
             elif cmd in ("CALIB", "CALIBRATE") and len(tokens) == 2:
@@ -423,6 +591,8 @@ def setup_readline(param_names):
                 options = ["ENABLE", "DISABLE"]
             elif cmd == "RUN" and len(tokens) == 2:
                 options = ["LEFT", "RIGHT"]
+            elif cmd == "IMPORT" and len(tokens) == 3:
+                options = ["SAVE"]
             else:
                 options = []
         matches = [opt for opt in options if opt.upper().startswith(text.upper())]
@@ -435,6 +605,16 @@ def setup_readline(param_names):
 
 
 def cmd_get(client, param_map, name):
+    if name.endswith(".*"):
+        prefix = name[:-1]
+        matches = [entry.name for entry in param_map.values() if entry.name.startswith(prefix)]
+        if not matches:
+            print("Unknown param prefix: {}".format(prefix))
+            return
+        for entry_name in sorted(matches):
+            cmd_get(client, param_map, entry_name)
+        return
+
     entry = param_map.get(name)
     if entry is None:
         print("Unknown param: {}".format(name))
@@ -482,27 +662,20 @@ def cmd_set(client, param_map, name, value_str, save_flag=False):
     except (ValueError, struct.error) as exc:
         print("SET {}: invalid value ({})".format(name, exc))
         return
+    if entry.name in ("balance.max_tilt_ref", "balance.thetaKill"):
+        try:
+            new_value = entry.decode(data)
+        except (ValueError, struct.error):
+            new_value = None
+        if new_value is not None:
+            warn_balance_limits(client, param_map, entry, new_value)
     try:
-        frame = client.rpc_exchange(
-            ROBOT_RPC_METHOD_SET_PARAM,
-            entry.offset,
-            entry.size,
-            data,
-            save_flag=save_flag,
-        )
-    except (TimeoutError, ConnectionError) as exc:
+        ok, msg = write_param_value(client, entry, data, save_flag=save_flag)
+    except (TimeoutError, ConnectionError, ValueError) as exc:
         print("SET failed: {}".format(exc))
         return
-    try:
-        method, status, offset, length, _data = parse_rpc_response(frame)
-    except ValueError as exc:
-        print("SET failed: {}".format(exc))
-        return
-    if method != ROBOT_RPC_METHOD_SET_PARAM or offset != entry.offset or length != entry.size:
-        print("SET {}: unexpected response".format(name))
-        return
-    if status != 0:
-        print("SET {}: {}".format(name, RPC_STATUS_NAMES.get(status, "ERR")))
+    if not ok:
+        print("SET {}: {}".format(name, msg))
         return
     print("SET {}: OK".format(name))
 
@@ -748,6 +921,24 @@ def repl(client, params):
                     continue
                 save_flag = True
             cmd_set(client, param_map, tokens[1], tokens[2], save_flag=save_flag)
+            continue
+        if cmd == "EXPORT":
+            if len(tokens) != 2:
+                print("Usage: EXPORT <file>")
+                continue
+            cmd_export(client, params, tokens[1])
+            continue
+        if cmd == "IMPORT":
+            if len(tokens) < 2 or len(tokens) > 3:
+                print("Usage: IMPORT <file> [SAVE]")
+                continue
+            save_flag = False
+            if len(tokens) == 3:
+                if tokens[2].upper() != "SAVE":
+                    print("Usage: IMPORT <file> [SAVE]")
+                    continue
+                save_flag = True
+            cmd_import(client, param_map, tokens[1], save_flag=save_flag)
             continue
         if cmd == "MOTOR":
             if len(tokens) != 2 or tokens[1].upper() not in ("ENABLE", "DISABLE"):

@@ -67,7 +67,7 @@
 
 ## Passthrough Runtime Behavior
 - When entering:
-  - Stop sending controller teleop and heartbeat frames.
+  - Stop sending controller teleop frames (heartbeat only needed when idle).
   - Flush UART and socket buffers to start on frame boundaries.
   - Update OLED to "RP Passthrough" + connection status.
 - While active:
@@ -75,7 +75,7 @@
   - UART traffic is exclusively from the Wi-Fi client.
 - When exiting:
   - Close TCP client, reset bridge buffers.
-  - Resume controller teleop/heartbeat behavior.
+  - Resume controller teleop behavior (heartbeat only needed when idle).
 
 ## CLI Tool (cli/)
 ### Scope (initial)

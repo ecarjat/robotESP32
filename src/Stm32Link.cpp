@@ -17,8 +17,8 @@ Stm32Link::Stm32Link(HardwareSerial& port) : port_(port) {
   robot_mux_register(
       &mux_, ROBOT_CHANNEL_TELEM,
       [](uint8_t, const uint8_t* payload, size_t len, void* ctx) {
-        if (len < sizeof(robot_telem_v1_t)) return;
-        const robot_telem_v1_t* telem = reinterpret_cast<const robot_telem_v1_t*>(payload);
+        if (len < sizeof(robot_telem_v2_t)) return;
+        const robot_telem_v2_t* telem = reinterpret_cast<const robot_telem_v2_t*>(payload);
         Stm32Link* self = static_cast<Stm32Link*>(ctx);
         const uint32_t now = millis();
         portENTER_CRITICAL(&self->lock_);
@@ -29,10 +29,18 @@ Stm32Link::Stm32Link(HardwareSerial& port) : port_(port) {
         self->status_.faults = telem->faults;
         self->status_.linkOk = true;
         portEXIT_CRITICAL(&self->lock_);
-        Serial.printf("[TELEM] v%u status=0x%02x faults=0x%04x ts=%lu vx=%.2f wz=%.2f batt=%.2fV\n",
-                      telem->version, telem->status, telem->faults,
-                      static_cast<unsigned long>(telem->timestamp_ms), telem->vx_mps,
-                      telem->wz_radps, telem->batt_v);
+        Serial.printf(
+            "[TELEM] v%u status=0x%02x faults=0x%04x ts=%lu theta=%.3f dtheta=%.3f wl=%.3f wr=%.3f iqL=%.3f iqR=%.3f\n",
+            telem->version,
+            telem->status,
+            telem->faults,
+            static_cast<unsigned long>(telem->timestamp_ms),
+            telem->theta_rad,
+            telem->theta_dot,
+            telem->wheel_left_rps,
+            telem->wheel_right_rps,
+            telem->iq_left,
+            telem->iq_right);
       },
       this);
   robot_mux_register(
@@ -59,6 +67,9 @@ void Stm32Link::begin() {
   port_.setTxBufferSize(RP_STMLINK_TX_BUFFER_SIZE);
   port_.begin(LINK_BAUD, SERIAL_8N1);
   port_.setHwFlowCtrlMode(UART_HW_FLOWCTRL_CTS_RTS, RP_STMLINK_FLOWCTRL_THRESHOLD);
+  const uint32_t now = millis();
+  lastTxMs_ = now;
+  lastHeartbeatMs_ = now;
 }
 
 void Stm32Link::tick() {
@@ -70,7 +81,8 @@ void Stm32Link::tick() {
 
   const uint32_t now = millis();
 
-  if (now - lastHeartbeatMs_ >= HEARTBEAT_PERIOD_MS) {
+  // Only send heartbeat when idle (no other frames recently sent).
+  if (now - lastTxMs_ >= HEARTBEAT_PERIOD_MS) {
     if (sendFrame(ROBOT_MSG_CMD_HEARTBEAT, nullptr, 0, false, true)) {
       lastHeartbeatMs_ = now;
       missedHeartbeatCount_ = 0;
@@ -230,6 +242,7 @@ bool Stm32Link::sendFrame(uint8_t type, const uint8_t* payload, uint16_t len, bo
   }
 
   port_.write(encoded, encodedLen);
+  lastTxMs_ = millis();
 
   if (requestAck && robot_msg_needs_ack(type)) {
     pending_.inUse = true;

@@ -19,7 +19,7 @@
 - Bluetooth Xbox controller mapping → `CMD` messages:
   - forward/back velocity, turn/yaw
   - mode buttons (arm/disarm, mode cycle), e-stop/disarm
-- Send CMD at fixed rate (e.g., 100 Hz) plus heartbeat.
+- Send CMD at fixed rate (e.g., 100 Hz). Heartbeat is only needed when idle.
 - **Passthrough mode**: ESP32 can be commanded to bypass routing and expose a transparent UART bridge (e.g., for STM32 flashing/debug). Enter/exit via a dedicated RPC or GPIO-safe-boot latch; all protocol parsing is paused while passthrough is active.
 
 ## Telemetry Frame (TELEM_FRAME proposal)
@@ -65,7 +65,7 @@ typedef struct __attribute__((packed)) {
 ### Link behavior
 - STM32 RX non-blocking: UART DMA circular + IDLE interrupt; parsing in main loop.
 - Sequence numbers on CMD/FILE/RPC.
-- Heartbeat: ESP32 sends `CMD_HEARTBEAT` ~10 Hz; STM32 marks link stale if no heartbeat > ~250 ms.
+- Heartbeat: ESP32 sends `CMD_HEARTBEAT` only when no other frames are sent; STM32 marks link stale if no frames > ~250 ms.
 
 ## Protocol Spec (STM32↔ESP32)
 ### Frame format (proposed)

@@ -64,6 +64,7 @@ class Stm32Link {
   uint32_t lastHeartbeatWarnMs_ = 0;
   uint32_t missedHeartbeatCount_ = 0;
   uint32_t lastTeleopMs_ = 0;
+  uint32_t lastTxMs_ = 0;
   uint32_t telemCount_ = 0;
   uint32_t lastTelemRxMs_ = 0;
   volatile bool passthrough_ = false;

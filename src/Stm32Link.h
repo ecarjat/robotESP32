@@ -29,6 +29,7 @@ class Stm32Link {
     uint8_t status = 0;
     uint16_t faults = 0;
     bool linkOk = false;
+    float adcVoltage = 0.0f;
   };
   LinkStatus getStatus() const;
 

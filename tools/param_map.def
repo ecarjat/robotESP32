@@ -69,3 +69,4 @@ PARAM_ENTRY("control_rate_hz", control_rate_hz, "float"),
 
 PARAM_ENTRY("uart_baudrate", uart_baudrate, "u32"),
 PARAM_ENTRY("robot_id", robot_id, "u8"),
+PARAM_ENTRY("adc_voltage_multiplier", adc_voltage_multiplier, "float"),

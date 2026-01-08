@@ -6,6 +6,7 @@ import shlex
 import socket
 import struct
 import sys
+import threading
 import time
 import zlib
 
@@ -21,6 +22,7 @@ ROBOT_FRAME_MAX_PAYLOAD = 240
 ROBOT_MSG_RPC_REQ = 0x30
 ROBOT_MSG_RPC_RESP = 0x31
 ROBOT_MSG_ACK = 0x7F
+ROBOT_MSG_CMD_HEARTBEAT = 0x01
 
 ROBOT_FLAG_ACK_REQ = 0x0001
 ROBOT_FLAG_IS_ACK = 0x0002
@@ -249,12 +251,27 @@ class RobotClient:
         self.seq = 0
         self.timeout = timeout
         self.retries = retries
+        self.lock = threading.Lock()
+        self.running = True
+        self.hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self.hb_thread.start()
 
     def close(self):
+        self.running = False
         try:
             self.sock.close()
         except OSError:
             pass
+
+    def _heartbeat_loop(self):
+        while self.running:
+            try:
+                # Heartbeat is a command message with empty payload
+                # Using seq=0 as it doesn't require ACK or ordering
+                self.send_frame(ROBOT_MSG_CMD_HEARTBEAT, 0, 0, b"")
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.1)
 
     def next_seq(self):
         self.seq = (self.seq + 1) & 0xFFFF
@@ -263,7 +280,9 @@ class RobotClient:
         return self.seq
 
     def send_frame(self, msg_type, seq, flags, payload):
-        self.sock.sendall(encode_frame(msg_type, seq, flags, payload))
+        data = encode_frame(msg_type, seq, flags, payload)
+        with self.lock:
+            self.sock.sendall(data)
 
     def send_ack(self, seq):
         self.send_frame(ROBOT_MSG_ACK, seq, ROBOT_FLAG_IS_ACK, b"")

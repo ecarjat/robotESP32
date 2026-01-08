@@ -147,7 +147,7 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
     display.drawString(0, 0, "Main");
     display.drawString(0, 2, "IMU:");
     display.drawString(0, 3, "Robot:");
-    display.drawString(0, 4, "Motor:");
+    display.drawString(0, 4, "Bat V:");
     display.drawString(0, 6, "Gamepad:");
     labelsDrawn = true;
   }
@@ -179,12 +179,17 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
     }
   }
   const char* robotState = fault ? "FAULT" : (estop ? "ESTOP" : (armed ? "ARMED" : "DISARM"));
-  const char* motorState = armed ? "ON" : "OFF";
   const bool connected = ctrl.isConnected();
+
+  // Format battery voltage
+  String voltageStr = "--";
+  if (status.hasTelem && status.adcVoltage > 0.01f) {
+    voltageStr = String(status.adcVoltage, 2) + "V";
+  }
 
   drawValue(2, 5, 0, imuState);
   drawValue(3, 7, 1, robotState);
-  drawValue(4, 7, 2, motorState);
+  drawValue(4, 7, 2, voltageStr);
   drawValue(6, 9, 3, connected ? "OK" : "--");
 }
 

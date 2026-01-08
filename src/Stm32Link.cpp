@@ -28,6 +28,7 @@ Stm32Link::Stm32Link(HardwareSerial& port) : port_(port) {
         self->status_.status = telem->status;
         self->status_.faults = telem->faults;
         self->status_.linkOk = true;
+        self->status_.adcVoltage = telem->adc_voltage;
         portEXIT_CRITICAL(&self->lock_);
         Serial.printf(
             "[TELEM] v%u status=0x%02x faults=0x%04x ts=%lu theta=%.3f dtheta=%.3f wl=%.3f wr=%.3f iqL=%.3f iqR=%.3f\n",

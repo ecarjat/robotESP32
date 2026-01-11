@@ -70,3 +70,6 @@ PARAM_ENTRY("control_rate_hz", control_rate_hz, "float"),
 PARAM_ENTRY("uart_baudrate", uart_baudrate, "u32"),
 PARAM_ENTRY("robot_id", robot_id, "u8"),
 PARAM_ENTRY("adc_voltage_multiplier", adc_voltage_multiplier, "float"),
+
+PARAM_ENTRY("log_fields_mask", log_fields_mask, "u32"),
+PARAM_ENTRY("dump_seconds_default", dump_seconds_default, "u16"),

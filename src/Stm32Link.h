@@ -58,6 +58,7 @@ class Stm32Link {
   robot_cmd_teleop_t pendingTeleop_{};
   uint8_t pendingTeleopFlags_ = 0;
   bool hasPendingTeleop_ = false;
+  bool latchedDump_ = false;
   uint16_t seqCounter_ = 0;
   uint8_t rxBuf_[ROBOT_FRAME_MAX_ENCODED];
   size_t rxLen_ = 0;

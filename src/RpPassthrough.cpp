@@ -1,5 +1,7 @@
 #include "RpPassthrough.h"
 
+#include <string.h>
+
 #if RP_ENABLE_MDNS
 #include <ESPmDNS.h>
 #endif
@@ -92,6 +94,8 @@ void RpPassthrough::setActive(bool enable) {
 
   active_ = enable;
   if (active_) {
+    rxPendingLen_ = 0U;
+    txPendingLen_ = 0U;
     if (!wifiReady_) {
       wifiReady_ = startWifi();
     }
@@ -211,6 +215,8 @@ void RpPassthrough::stopClient(const char* reason) {
     Serial.printf("[RP] %s\n", reason);
   }
   client_.stop();
+  rxPendingLen_ = 0U;
+  txPendingLen_ = 0U;
   if (rxDropCount_ || txDropCount_) {
     Serial.printf("[RP] Bridge drops rx=%lu tx=%lu\n", static_cast<unsigned long>(rxDropCount_),
                   static_cast<unsigned long>(txDropCount_));
@@ -372,22 +378,54 @@ bool RpPassthrough::attemptStaConnect(const String& ssid, const String& pass) {
 void RpPassthrough::bridge() {
   bool activity = false;
 
-  const size_t rxCount = readAvailable(client_, rxBuf_, sizeof(rxBuf_));
-  if (rxCount > 0U) {
-    size_t written = link_.write(rxBuf_, rxCount);
-    if (written < rxCount) {
-      rxDropCount_ += (rxCount - written);
+  if (rxPendingLen_ > 0U) {
+    const size_t written = link_.write(rxBuf_, rxPendingLen_);
+    if (written > 0U) {
+      rxPendingLen_ -= written;
+      if (rxPendingLen_ > 0U) {
+        memmove(rxBuf_, rxBuf_ + written, rxPendingLen_);
+      }
+      activity = true;
     }
-    activity = true;
   }
 
-  const size_t txCount = readAvailable(link_, txBuf_, sizeof(txBuf_));
-  if (txCount > 0U) {
-    size_t written = client_.write(txBuf_, txCount);
-    if (written < txCount) {
-      txDropCount_ += (txCount - written);
+  if (rxPendingLen_ == 0U) {
+    const size_t rxCount = readAvailable(client_, rxBuf_, sizeof(rxBuf_));
+    if (rxCount > 0U) {
+      const size_t written = link_.write(rxBuf_, rxCount);
+      if (written < rxCount) {
+        rxPendingLen_ = rxCount - written;
+        if (rxPendingLen_ > 0U) {
+          memmove(rxBuf_, rxBuf_ + written, rxPendingLen_);
+        }
+      }
+      activity = true;
     }
-    activity = true;
+  }
+
+  if (txPendingLen_ > 0U) {
+    const size_t written = client_.write(txBuf_, txPendingLen_);
+    if (written > 0U) {
+      txPendingLen_ -= written;
+      if (txPendingLen_ > 0U) {
+        memmove(txBuf_, txBuf_ + written, txPendingLen_);
+      }
+      activity = true;
+    }
+  }
+
+  if (txPendingLen_ == 0U) {
+    const size_t txCount = readAvailable(link_, txBuf_, sizeof(txBuf_));
+    if (txCount > 0U) {
+      const size_t written = client_.write(txBuf_, txCount);
+      if (written < txCount) {
+        txPendingLen_ = txCount - written;
+        if (txPendingLen_ > 0U) {
+          memmove(txBuf_, txBuf_ + written, txPendingLen_);
+        }
+      }
+      activity = true;
+    }
   }
 
   if (activity) {

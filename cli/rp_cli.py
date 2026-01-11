@@ -24,6 +24,12 @@ ROBOT_MSG_RPC_RESP = 0x31
 ROBOT_MSG_ACK = 0x7F
 ROBOT_MSG_CMD_HEARTBEAT = 0x01
 
+ROBOT_MSG_FILE_LIST_REQ = 0x20
+ROBOT_MSG_FILE_LIST_RESP = 0x21
+ROBOT_MSG_FILE_READ_REQ = 0x22
+ROBOT_MSG_FILE_READ_RESP = 0x23
+ROBOT_MSG_FILE_ERR = 0x24
+
 ROBOT_FLAG_ACK_REQ = 0x0001
 ROBOT_FLAG_IS_ACK = 0x0002
 
@@ -81,6 +87,21 @@ TYPE_FORMATS = {
 }
 
 CALIB_TIMEOUT_S = 5.0
+FILE_TRANSFER_TIMEOUT_S = 5.0
+ROBOT_FILE_MAX_FILENAME = 64
+ROBOT_FILE_CHUNK_SIZE = 200
+
+ROBOT_FILE_ERR_NOT_FOUND = 1
+ROBOT_FILE_ERR_READ_ERROR = 2
+ROBOT_FILE_ERR_BUSY = 3
+ROBOT_FILE_ERR_INVALID_REQ = 4
+
+FILE_ERR_NAMES = {
+    ROBOT_FILE_ERR_NOT_FOUND: "NOT_FOUND",
+    ROBOT_FILE_ERR_READ_ERROR: "READ_ERROR",
+    ROBOT_FILE_ERR_BUSY: "BUSY",
+    ROBOT_FILE_ERR_INVALID_REQ: "INVALID_REQUEST",
+}
 
 FACE_NAME_MAP = {
     "UP": ROBOT_IMU_FACE_Z_POS_UP,
@@ -253,6 +274,7 @@ class RobotClient:
         self.retries = retries
         self.lock = threading.Lock()
         self.running = True
+        self.heartbeat_enabled = True
         self.hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self.hb_thread.start()
 
@@ -266,9 +288,10 @@ class RobotClient:
     def _heartbeat_loop(self):
         while self.running:
             try:
-                # Heartbeat is a command message with empty payload
-                # Using seq=0 as it doesn't require ACK or ordering
-                self.send_frame(ROBOT_MSG_CMD_HEARTBEAT, 0, 0, b"")
+                if self.heartbeat_enabled:
+                    # Heartbeat is a command message with empty payload
+                    # Using seq=0 as it doesn't require ACK or ordering
+                    self.send_frame(ROBOT_MSG_CMD_HEARTBEAT, 0, 0, b"")
             except (OSError, ValueError):
                 pass
             time.sleep(0.1)
@@ -311,6 +334,9 @@ class RobotClient:
             if not data:
                 raise ConnectionError("Connection closed")
             self.rx_buf.extend(data)
+
+    def set_heartbeat_enabled(self, enabled):
+        self.heartbeat_enabled = enabled
 
     def rpc_exchange(self, method, offset, length, data, save_flag=False):
         flags = ROBOT_RPC_FLAG_SAVE if save_flag else 0
@@ -542,6 +568,8 @@ def print_help():
     print("  DISARM               Disarm and disable motors")
     print("  MOTOR ENABLE|DISABLE Enable or disable motors for manual run")
     print("  RUN LEFT|RIGHT <intensity>  Manual run (-1..1, scaled by IqMax)")
+    print("  FILES | LIST         List files on SD card")
+    print("  PULL <file> [dest]   Download file from SD card (robot must not be balancing)")
     print("  SAVE                 Persist parameters to flash (firmware support required)")
     print("  HELP                 Show this help")
     print("  EXIT | QUIT          Exit the CLI")
@@ -568,6 +596,9 @@ def setup_readline(param_names):
         "MOTOR",
         "RUN",
         "DISARM",
+        "FILES",
+        "LIST",
+        "PULL",
         "SAVE",
         "HELP",
         "EXIT",
@@ -893,6 +924,199 @@ def cmd_run(client, side_name, value_str):
     print("RUN {}: OK".format(side_name))
 
 
+def cmd_file_list(client):
+    """List files on SD card"""
+    try:
+        seq = client.next_seq()
+        payload = struct.pack("<B", 0)  # reserved byte
+        client.send_frame(ROBOT_MSG_FILE_LIST_REQ, seq, ROBOT_FLAG_ACK_REQ, payload)
+
+        # Wait for response
+        deadline = time.time() + FILE_TRANSFER_TIMEOUT_S
+        while time.time() < deadline:
+            try:
+                frame = client.read_frame(timeout=deadline - time.time())
+            except TimeoutError:
+                break
+
+            if frame.msg_type == ROBOT_MSG_FILE_ERR and frame.seq == seq:
+                if len(frame.payload) >= 1:
+                    error_code = struct.unpack_from("<B", frame.payload, 0)[0]
+                    print("FILE LIST: {}".format(FILE_ERR_NAMES.get(error_code, "ERR")))
+                else:
+                    print("FILE LIST: error")
+                return
+
+            if frame.msg_type == ROBOT_MSG_FILE_LIST_RESP and frame.seq == seq:
+                if len(frame.payload) < 2:
+                    print("FILE LIST: invalid response")
+                    return
+
+                count, more = struct.unpack_from("<BB", frame.payload, 0)
+                offset = 2
+
+                if count == 0:
+                    print("No files found")
+                    return
+
+                print("Files on SD card:")
+                for i in range(count):
+                    if offset + ROBOT_FILE_MAX_FILENAME + 4 > len(frame.payload):
+                        break
+                    filename_bytes = frame.payload[offset:offset + ROBOT_FILE_MAX_FILENAME]
+                    filename = filename_bytes.split(b'\x00', 1)[0].decode('utf-8', errors='replace')
+                    size = struct.unpack_from("<I", frame.payload, offset + ROBOT_FILE_MAX_FILENAME)[0]
+                    print("  {:32s}  {:10d} bytes".format(filename, size))
+                    offset += ROBOT_FILE_MAX_FILENAME + 4
+
+                if more:
+                    print("  (more files not shown)")
+                return
+
+        print("FILE LIST: timeout")
+    except (TimeoutError, ConnectionError) as exc:
+        print("FILE LIST failed: {}".format(exc))
+
+
+def cmd_file_pull(client, filename, dest_path=None):
+    """Download a file from SD card"""
+    if dest_path is None:
+        dest_path = filename
+
+    # Validate filename length
+    if len(filename) >= ROBOT_FILE_MAX_FILENAME:
+        print("PULL: filename too long (max {} chars)".format(ROBOT_FILE_MAX_FILENAME - 1))
+        return
+
+    try:
+        client.set_heartbeat_enabled(False)
+        # First request to get file size
+        seq = client.next_seq()
+        filename_bytes = filename.encode('utf-8').ljust(ROBOT_FILE_MAX_FILENAME, b'\x00')
+        payload = filename_bytes + struct.pack("<IH", 0, 0)  # offset=0, length=0 to get size
+        client.send_frame(ROBOT_MSG_FILE_READ_REQ, seq, ROBOT_FLAG_ACK_REQ, payload)
+
+        # Wait for first response
+        deadline = time.time() + FILE_TRANSFER_TIMEOUT_S
+        frame = None
+        while time.time() < deadline:
+            try:
+                frame = client.read_frame(timeout=deadline - time.time())
+            except TimeoutError:
+                break
+
+            if frame.msg_type == ROBOT_MSG_FILE_ERR and frame.seq == seq:
+                if len(frame.payload) >= 1:
+                    error_code = struct.unpack_from("<B", frame.payload, 0)[0]
+                    print("PULL: {}".format(FILE_ERR_NAMES.get(error_code, "ERR")))
+                else:
+                    print("PULL: error")
+                return
+
+            if frame.msg_type == ROBOT_MSG_FILE_READ_RESP and frame.seq == seq:
+                if len(frame.payload) < 10:
+                    print("PULL: short FILE_READ_RESP (len={})".format(len(frame.payload)))
+                    frame = None
+                    continue
+                break
+
+        if frame is None or frame.msg_type != ROBOT_MSG_FILE_READ_RESP:
+            print("PULL: timeout waiting for response")
+            return
+
+        if len(frame.payload) < 10:
+            print("PULL: invalid response")
+            return
+
+        offset, total_size, chunk_len = struct.unpack_from("<IIH", frame.payload, 0)
+
+        print("Downloading {} ({} bytes)...".format(filename, total_size))
+
+        # Open output file
+        try:
+            out_file = open(dest_path, "wb")
+        except OSError as exc:
+            print("PULL: failed to create output file: {}".format(exc))
+            return
+
+        try:
+            # Download file in chunks
+            bytes_received = 0
+            current_offset = 0
+
+            while current_offset < total_size:
+                # Request next chunk
+                seq = client.next_seq()
+                chunk_size = min(ROBOT_FILE_CHUNK_SIZE, total_size - current_offset)
+                payload = filename_bytes + struct.pack("<IH", current_offset, chunk_size)
+                client.send_frame(ROBOT_MSG_FILE_READ_REQ, seq, ROBOT_FLAG_ACK_REQ, payload)
+
+                # Wait for response
+                deadline = time.time() + FILE_TRANSFER_TIMEOUT_S
+                frame = None
+                while time.time() < deadline:
+                    try:
+                        frame = client.read_frame(timeout=deadline - time.time())
+                    except TimeoutError:
+                        break
+
+                    if frame.msg_type == ROBOT_MSG_FILE_ERR and frame.seq == seq:
+                        if len(frame.payload) >= 1:
+                            error_code = struct.unpack_from("<B", frame.payload, 0)[0]
+                            print("\nPULL: {} at offset {}".format(
+                                FILE_ERR_NAMES.get(error_code, "ERR"), current_offset))
+                        else:
+                            print("\nPULL: error at offset {}".format(current_offset))
+                        return
+
+                    if frame.msg_type == ROBOT_MSG_FILE_READ_RESP and frame.seq == seq:
+                        if len(frame.payload) < 10:
+                            print("\nPULL: short FILE_READ_RESP at offset {} (len={})".format(
+                                current_offset, len(frame.payload)))
+                            frame = None
+                            continue
+                        break
+
+                if frame is None or frame.msg_type != ROBOT_MSG_FILE_READ_RESP:
+                    print("\nPULL: timeout at offset {}".format(current_offset))
+                    return
+
+                if len(frame.payload) < 10:
+                    print("\nPULL: invalid response at offset {}".format(current_offset))
+                    return
+
+                resp_offset, resp_total_size, resp_chunk_len = struct.unpack_from("<IIH", frame.payload, 0)
+
+                if resp_offset != current_offset:
+                    print("\nPULL: offset mismatch (expected {}, got {})".format(
+                        current_offset, resp_offset))
+                    return
+
+                if resp_chunk_len > 0:
+                    chunk_data = frame.payload[10:10 + resp_chunk_len]
+                    out_file.write(chunk_data)
+                    bytes_received += resp_chunk_len
+                    current_offset += resp_chunk_len
+
+                    # Progress indicator
+                    progress = (bytes_received * 100) // total_size if total_size > 0 else 100
+                    print("\r  Progress: {}% ({}/{} bytes)".format(
+                        progress, bytes_received, total_size), end='', flush=True)
+                else:
+                    # Empty chunk, shouldn't happen unless EOF
+                    break
+
+            print("\nPULL: OK - saved to {}".format(dest_path))
+
+        finally:
+            out_file.close()
+
+    except (TimeoutError, ConnectionError) as exc:
+        print("\nPULL failed: {}".format(exc))
+    finally:
+        client.set_heartbeat_enabled(True)
+
+
 def repl(client, params):
     param_map = {p.name: p for p in params}
     setup_readline(param_map.keys())
@@ -989,6 +1213,19 @@ def repl(client, params):
                 print("Usage: DISARM")
                 continue
             cmd_disarm(client)
+            continue
+        if cmd in ("FILES", "LIST"):
+            if len(tokens) != 1:
+                print("Usage: FILES")
+                continue
+            cmd_file_list(client)
+            continue
+        if cmd == "PULL":
+            if len(tokens) < 2 or len(tokens) > 3:
+                print("Usage: PULL <filename> [dest]")
+                continue
+            dest = tokens[2] if len(tokens) == 3 else None
+            cmd_file_pull(client, tokens[1], dest)
             continue
         if cmd == "SAVE":
             cmd_save(client)

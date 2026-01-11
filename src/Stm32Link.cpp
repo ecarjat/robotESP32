@@ -108,12 +108,19 @@ void Stm32Link::sendTeleop(const XboxControlsState& state, uint8_t flags) {
     return;
   }
 
+  const bool dumpRequested = (flags & ROBOT_TELEOP_FLAG_DUMP) != 0U;
   robot_cmd_teleop_t cmd{};
   cmd.vx_mps = state.leftStickY;
   cmd.wz_radps = -state.leftStickX;
-  cmd.flags = flags;
 
   portENTER_CRITICAL(&lock_);
+  if (dumpRequested) {
+    latchedDump_ = true;
+  }
+  if (latchedDump_) {
+    flags |= ROBOT_TELEOP_FLAG_DUMP;
+  }
+  cmd.flags = flags;
   pendingTeleop_ = cmd;
   pendingTeleopFlags_ = flags;
   hasPendingTeleop_ = true;
@@ -299,6 +306,9 @@ void Stm32Link::trySendTeleop() {
     portENTER_CRITICAL(&lock_);
     hasPendingTeleop_ = false;
     lastTeleopMs_ = now;
+    if ((cmd.flags & ROBOT_TELEOP_FLAG_DUMP) != 0U) {
+      latchedDump_ = false;
+    }
     portEXIT_CRITICAL(&lock_);
   }
 }

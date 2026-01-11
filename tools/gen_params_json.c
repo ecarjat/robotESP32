@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdalign.h>
 
-#include "../../firmware/Drivers/param_storage.h"
+#include "../../firmware/app/drivers/param_storage.h"
 
 typedef struct {
   const char *name;

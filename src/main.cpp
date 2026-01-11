@@ -92,6 +92,9 @@ static uint32_t gLastYToggleMs = 0;
 static XboxControlsState gPrevState;
 static uint32_t gLoopReportMs = 0;
 static constexpr float kTeleopDeadzone = 0.12f;
+static bool gPrevXButton = false;
+static bool gDumpRequested = false;
+static uint32_t gLastXPressMs = 0;
 
 static float applyDeadzone(float value, float deadzone) {
   if (value > -deadzone && value < deadzone) {
@@ -365,11 +368,23 @@ void loop() {
       }
     }
     gPrevYButton = yPressed;
+
+    const bool xPressed = s.buttonX;
+    if (xPressed && !gPrevXButton) {
+      if (now - gLastXPressMs >= kYToggleDebounceMs) {
+        gDumpRequested = true;
+        gLastXPressMs = now;
+        Serial.println("[ESP32] X button pressed - dump requested");
+      }
+    }
+    gPrevXButton = xPressed;
   } else {
     g_connected = false;
     gPrevState = {};
     gPrevMenuButton = false;
     gPrevYButton = false;
+    gPrevXButton = false;
+    gDumpRequested = false;
     gTeleopEstopActive = true;
   }
 
@@ -398,8 +413,12 @@ void loop() {
     return;
   }
 
-  const uint8_t teleopFlags =
+  uint8_t teleopFlags =
       gTeleopEstopActive ? ROBOT_TELEOP_FLAG_ESTOP : ROBOT_TELEOP_FLAG_ARM;
+  const bool dumpPending = gDumpRequested;
+  if (dumpPending) {
+    teleopFlags |= ROBOT_TELEOP_FLAG_DUMP;
+  }
   if (ctrlConnected) {
     if (gMenuActive) {
       gpIn.update(s);
@@ -409,6 +428,10 @@ void loop() {
       filtered.leftStickY = applyDeadzone(filtered.leftStickY, kTeleopDeadzone);
       filtered.leftStickX = applyDeadzone(filtered.leftStickX, kTeleopDeadzone);
       stmLink.sendTeleop(filtered, teleopFlags);
+      if (dumpPending) {
+        gDumpRequested = false;
+        Serial.printf("[ESP32] Adding DUMP flag to teleop, flags=0x%02x\n", teleopFlags);
+      }
 
       renderDashboard(stmLink, controller, gForceDashboardRedraw);
       gForceDashboardRedraw = false;

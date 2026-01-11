@@ -63,6 +63,8 @@ class RpPassthrough {
   uint32_t txDropCount_ = 0;
   char ipStr_[16];
   char apSsid_[32];
+  size_t rxPendingLen_ = 0;
+  size_t txPendingLen_ = 0;
   uint8_t rxBuf_[RP_BRIDGE_RX_BUF_SIZE];
   uint8_t txBuf_[RP_BRIDGE_TX_BUF_SIZE];
 };

@@ -7,7 +7,8 @@ packages = [{ include = "cli" }]
 include = ["cli/params.json"]
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = "^3.10"
+matplotlib = "^3.10.8"
 
 [tool.poetry.scripts]
 rp-cli = "cli.rp_cli:main"

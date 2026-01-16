@@ -138,7 +138,7 @@ static void setMenuActive(bool on) {
 
 static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, bool forceRedraw) {
   static bool labelsDrawn = false;
-  static String lastVals[4];
+  static String lastVals[5];
   if (forceRedraw) {
     labelsDrawn = false;
     for (auto& v : lastVals) {
@@ -149,14 +149,16 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
     display.clear();
     display.drawString(0, 0, "Main");
     display.drawString(0, 2, "IMU:");
-    display.drawString(0, 3, "Robot:");
-    display.drawString(0, 4, "Bat V:");
-    display.drawString(0, 6, "Gamepad:");
+    display.drawString(0, 3, "Gamepad:");
+    display.drawString(0, 4, "Robot:");
+    display.drawString(0, 5, "Bat V:");
+    // display.drawString(0, 6, "Dump:");
+
     labelsDrawn = true;
   }
 
   auto drawValue = [&](uint8_t row, uint8_t col, uint8_t idx, const String& text) {
-    if (idx >= 4) return;
+    if (idx >= 5) return;
     String padded = text;
     const uint8_t maxLen = (col < 16) ? (16 - col) : 0;
     if (padded.length() > maxLen) padded = padded.substring(0, maxLen);
@@ -170,6 +172,7 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
   bool armed = (status.status & ROBOT_STATUS_ARMED);
   bool estop = (status.status & ROBOT_STATUS_ESTOP);
   bool fault = (status.status & ROBOT_STATUS_FAULT) || (status.faults != 0);
+  bool dumping = (status.status & ROBOT_STATUS_DUMPING) != 0;
   const bool imuCal = (status.status & ROBOT_STATUS_IMU_CAL) != 0;
   const char* imuState = "--";
   if (status.hasTelem) {
@@ -189,11 +192,14 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
   if (status.hasTelem && status.adcVoltage > 0.01f) {
     voltageStr = String(status.adcVoltage, 2) + "V";
   }
+  const String dumpStr = dumping ? "Dumping ..." : "";
 
   drawValue(2, 5, 0, imuState);
-  drawValue(3, 7, 1, robotState);
-  drawValue(4, 7, 2, voltageStr);
-  drawValue(6, 9, 3, connected ? "OK" : "--");
+  drawValue(3, 9, 3, connected ? "OK" : "--");
+  drawValue(4, 7, 1, robotState);
+  drawValue(5, 7, 2, voltageStr);
+  drawValue(6, 4, 4, dumpStr);
+  
 }
 
 static void renderPassthroughScreen(RpPassthrough& pt, bool forceRedraw) {

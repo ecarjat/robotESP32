@@ -16,6 +16,7 @@
 #include "GamepadMenuIn.h"
 #include "RpPassthrough.h"
 #include "Stm32Link.h"
+#include "TeleopInput.h"
 #include "config_pins.h"
 #include "rp_passthrough_config.h"
 #include "ui/menu_ui.h"
@@ -26,19 +27,20 @@ GamepadMenuIn gpIn;
 XboxController controller;
 U8X8_SSD1306_128X64_NONAME_HW_I2C display(U8X8_PIN_NONE);
 static constexpr uint8_t I2C_ADDR_8BIT = 0x78;
+static constexpr uint8_t lastValsIdx = 7;
 bool g_connected = false;
 #define U8_Width 128
 #define U8_Height 64
 HardwareSerial linkSerial(2);
 Stm32Link stmLink(linkSerial);
 RpPassthrough rpPassthrough(linkSerial);
+TeleopInput gTeleopInput;
 
 static uint32_t gBootMs = 0;
 static bool gControllerEverConnected = false;
 static bool gForceDashboardRedraw = true;
 static bool gForcePassthroughRedraw = true;
 static TaskHandle_t gStmLinkTaskHandle = nullptr;
-static constexpr uint32_t kYToggleDebounceMs = 250U;
 
 #ifndef RP_STMLINK_TASK_STACK_WORDS
 #define RP_STMLINK_TASK_STACK_WORDS 4096U
@@ -86,15 +88,9 @@ NAVROOT(nav, MenuUI::mainMenu, MAX_DEPTH, in, out);
 
 static bool gMenuActive = false;
 static bool gPrevMenuButton = false;
-static bool gPrevYButton = false;
-static bool gTeleopEstopActive = true;
-static uint32_t gLastYToggleMs = 0;
 static XboxControlsState gPrevState;
 static uint32_t gLoopReportMs = 0;
 static constexpr float kTeleopDeadzone = 0.12f;
-static bool gPrevXButton = false;
-static bool gDumpRequested = false;
-static uint32_t gLastXPressMs = 0;
 
 static float applyDeadzone(float value, float deadzone) {
   if (value > -deadzone && value < deadzone) {
@@ -136,9 +132,10 @@ static void setMenuActive(bool on) {
   gForcePassthroughRedraw = true;
 }
 
-static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, bool forceRedraw) {
+static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, bool forceRedraw,
+                            bool lqrMode) {
   static bool labelsDrawn = false;
-  static String lastVals[5];
+  static String lastVals[lastValsIdx];
   if (forceRedraw) {
     labelsDrawn = false;
     for (auto& v : lastVals) {
@@ -152,13 +149,12 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
     display.drawString(0, 3, "Gamepad:");
     display.drawString(0, 4, "Robot:");
     display.drawString(0, 5, "Bat V:");
-    // display.drawString(0, 6, "Dump:");
 
     labelsDrawn = true;
   }
 
   auto drawValue = [&](uint8_t row, uint8_t col, uint8_t idx, const String& text) {
-    if (idx >= 5) return;
+    if (idx >= lastValsIdx ) return;
     String padded = text;
     const uint8_t maxLen = (col < 16) ? (16 - col) : 0;
     if (padded.length() > maxLen) padded = padded.substring(0, maxLen);
@@ -186,6 +182,7 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
   }
   const char* robotState = fault ? "FAULT" : (estop ? "ESTOP" : (armed ? "ARMED" : "DISARM"));
   const bool connected = ctrl.isConnected();
+  const char* modeStr = lqrMode ? "LQR" : "PID";
 
   // Format battery voltage
   String voltageStr = "--";
@@ -199,6 +196,7 @@ static void renderDashboard(const Stm32Link& link, const XboxController& ctrl, b
   drawValue(4, 7, 1, robotState);
   drawValue(5, 7, 2, voltageStr);
   drawValue(6, 4, 4, dumpStr);
+  drawValue(0, 12, 5, modeStr);
   
 }
 
@@ -366,32 +364,14 @@ void loop() {
     if (menuPressed) {
       setMenuActive(!gMenuActive);
     }
-    const bool yPressed = s.buttonY;
-    if (yPressed && !gPrevYButton) {
-      if (now - gLastYToggleMs >= kYToggleDebounceMs) {
-        gTeleopEstopActive = !gTeleopEstopActive;
-        gLastYToggleMs = now;
-      }
+    if (gTeleopInput.update(s, now)) {
+      Serial.println("[ESP32] X button pressed - dump requested");
     }
-    gPrevYButton = yPressed;
-
-    const bool xPressed = s.buttonX;
-    if (xPressed && !gPrevXButton) {
-      if (now - gLastXPressMs >= kYToggleDebounceMs) {
-        gDumpRequested = true;
-        gLastXPressMs = now;
-        Serial.println("[ESP32] X button pressed - dump requested");
-      }
-    }
-    gPrevXButton = xPressed;
   } else {
     g_connected = false;
     gPrevState = {};
     gPrevMenuButton = false;
-    gPrevYButton = false;
-    gPrevXButton = false;
-    gDumpRequested = false;
-    gTeleopEstopActive = true;
+    gTeleopInput.onDisconnect();
   }
 
   if (!rpPassthrough.isActive() && !gControllerEverConnected && !ctrlConnected &&
@@ -419,12 +399,7 @@ void loop() {
     return;
   }
 
-  uint8_t teleopFlags =
-      gTeleopEstopActive ? ROBOT_TELEOP_FLAG_ESTOP : ROBOT_TELEOP_FLAG_ARM;
-  const bool dumpPending = gDumpRequested;
-  if (dumpPending) {
-    teleopFlags |= ROBOT_TELEOP_FLAG_DUMP;
-  }
+  const bool lqrMode = gTeleopInput.isLqrMode();
   if (ctrlConnected) {
     if (gMenuActive) {
       gpIn.update(s);
@@ -433,17 +408,17 @@ void loop() {
       XboxControlsState filtered = s;
       filtered.leftStickY = applyDeadzone(filtered.leftStickY, kTeleopDeadzone);
       filtered.leftStickX = applyDeadzone(filtered.leftStickX, kTeleopDeadzone);
+      const uint8_t teleopFlags = gTeleopInput.buildFlags();
       stmLink.sendTeleop(filtered, teleopFlags);
-      if (dumpPending) {
-        gDumpRequested = false;
+      if (gTeleopInput.onTeleopSent(teleopFlags)) {
         Serial.printf("[ESP32] Adding DUMP flag to teleop, flags=0x%02x\n", teleopFlags);
       }
 
-      renderDashboard(stmLink, controller, gForceDashboardRedraw);
+      renderDashboard(stmLink, controller, gForceDashboardRedraw, lqrMode);
       gForceDashboardRedraw = false;
     }
   } else {
-    renderDashboard(stmLink, controller, gForceDashboardRedraw);
+    renderDashboard(stmLink, controller, gForceDashboardRedraw, lqrMode);
     gForceDashboardRedraw = false;
   }
 
